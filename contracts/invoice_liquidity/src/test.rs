@@ -134,6 +134,43 @@ fn test_submit_invoice_stores_correct_fields() {
 }
 
 #[test]
+fn test_get_invoice_returns_existing_invoice() {
+    let t = setup();
+    let due_date = t.env.ledger().timestamp() + DUE_DATE_OFFSET;
+    let id = t.contract.submit_invoice(
+        &t.freelancer,
+        &t.payer,
+        &INVOICE_AMOUNT,
+        &due_date,
+        &DISCOUNT_RATE,
+        &t.token.address,
+    );
+
+    let invoice = t.contract.get_invoice(&id);
+
+    assert_eq!(invoice.id, id);
+    assert_eq!(invoice.freelancer, t.freelancer);
+    assert_eq!(invoice.payer, t.payer);
+    assert_eq!(invoice.token, t.token.address);
+    assert_eq!(invoice.amount, INVOICE_AMOUNT);
+    assert_eq!(invoice.due_date, due_date);
+    assert_eq!(invoice.discount_rate, DISCOUNT_RATE);
+    assert_eq!(invoice.status, InvoiceStatus::Pending);
+    assert_eq!(invoice.amount_funded, 0);
+    assert!(invoice.funder.is_none());
+    assert!(invoice.funded_at.is_none());
+}
+
+#[test]
+fn test_get_invoice_returns_invoice_not_found_for_missing_id() {
+    let t = setup();
+
+    let result = t.contract.try_get_invoice(&999);
+
+    assert_eq!(result, Err(Ok(ContractError::InvoiceNotFound)));
+}
+
+#[test]
 fn test_submit_multiple_invoices_increment_ids() {
     let t = setup();
 
@@ -891,4 +928,141 @@ fn test_payer_with_default() {
     let score = t.contract.payer_score(&t.payer);
 
     assert!(score < 50);
+}
+
+// ----------------------------------------------------------------
+// Reputation decay tests
+// ----------------------------------------------------------------
+
+#[test]
+fn test_reputation_decay_inactive_score() {
+    let t = setup();
+    
+    // Set payer score to 80
+    invoice::set_payer_score(&t.env, &t.payer, 80);
+    
+    // Initialize decay config: 100 bps (1%) per 1000 ledgers
+    let config = Config {
+        high_rep_threshold: 80,
+        bonus_bps: 200,
+        min_discount_rate_bps: 100,
+        decay_rate_bps: 100,        // 1% per period
+        decay_period_ledgers: 1000,
+    };
+    config::set_config(&t.env, &config).unwrap();
+    
+    // Advance ledger by 2100 (more than 2 periods)
+    let mut ledger = t.env.ledger().get();
+    ledger.sequence += 2100;
+    t.env.ledger().set(ledger);
+    
+    // Get score - should have decayed
+    let score = t.contract.payer_score(&t.payer);
+    
+    // After 2 periods: 80 -> 80 * 0.99 = 79.2 -> 79 * 0.99 = 78.2 -> 78
+    assert!(score < 80, "Score should decay from 80, got {}", score);
+    assert!(score >= 78, "Score should decay to ~78, got {}", score);
+}
+
+#[test]
+fn test_reputation_no_decay_when_inactive() {
+    let t = setup();
+    
+    // Set payer score to 80
+    invoice::set_payer_score(&t.env, &t.payer, 80);
+    
+    // Initialize decay config with very high decay period (never decays)
+    let config = Config {
+        high_rep_threshold: 80,
+        bonus_bps: 200,
+        min_discount_rate_bps: 100,
+        decay_rate_bps: 100,
+        decay_period_ledgers: 10_000_000,  // Very long period
+    };
+    config::set_config(&t.env, &config).unwrap();
+    
+    // Advance ledger by only 1000
+    let mut ledger = t.env.ledger().get();
+    ledger.sequence += 1000;
+    t.env.ledger().set(ledger);
+    
+    // Get score - should NOT have decayed
+    let score = t.contract.payer_score(&t.payer);
+    
+    assert_eq!(score, 80, "Score should not decay when period not reached");
+}
+
+#[test]
+fn test_reputation_decay_activity_resets() {
+    let t = setup();
+    
+    // Set initial score to 80
+    invoice::set_payer_score(&t.env, &t.payer, 80);
+    
+    let config = Config {
+        high_rep_threshold: 80,
+        bonus_bps: 200,
+        min_discount_rate_bps: 100,
+        decay_rate_bps: 100,
+        decay_period_ledgers: 1000,
+    };
+    config::set_config(&t.env, &config).unwrap();
+    
+    // Advance by half a decay period
+    let mut ledger = t.env.ledger().get();
+    ledger.sequence += 500;
+    t.env.ledger().set(ledger);
+    
+    // Activity: set score again (resets last_activity_ledger)
+    invoice::set_payer_score(&t.env, &t.payer, 85);
+    
+    // Advance by another half period (not enough from reset)
+    ledger = t.env.ledger().get();
+    ledger.sequence += 500;
+    t.env.ledger().set(ledger);
+    
+    // Score should not have decayed since reset
+    let score = t.contract.payer_score(&t.payer);
+    
+    assert_eq!(score, 85, "Score should not decay shortly after activity");
+}
+
+#[test]
+fn test_reputation_score_never_goes_below_zero() {
+    let t = setup();
+    
+    // Set payer score to only 5 (low)
+    invoice::set_payer_score(&t.env, &t.payer, 5);
+    
+    let config = Config {
+        high_rep_threshold: 80,
+        bonus_bps: 200,
+        min_discount_rate_bps: 100,
+        decay_rate_bps: 5000,  // Very aggressive decay: 50% per period
+        decay_period_ledgers: 100,
+    };
+    config::set_config(&t.env, &config).unwrap();
+    
+    // Advance by 10 decay periods
+    let mut ledger = t.env.ledger().get();
+    ledger.sequence += 1000;
+    t.env.ledger().set(ledger);
+    
+    // Get score - should floor at 0
+    let score = t.contract.payer_score(&t.payer);
+    
+    assert_eq!(score, 0, "Score should floor at 0, not go negative");
+}
+
+#[test]
+fn test_reputation_score_never_exceeds_100() {
+    let t = setup();
+    
+    // Try to set score above 100
+    invoice::set_payer_score(&t.env, &t.payer, 150);
+    
+    // Score should be capped at 100
+    let score = t.contract.payer_score(&t.payer);
+    
+    assert_eq!(score, 100, "Score should be capped at 100");
 }
