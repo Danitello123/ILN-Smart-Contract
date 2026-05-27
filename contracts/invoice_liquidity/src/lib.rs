@@ -1293,3 +1293,4 @@ mod tests_protocol_fee;
 mod tests_security;
 mod tests_state_machine;
 mod tests_storage;
+mod tests_reputation_edge_cases;
