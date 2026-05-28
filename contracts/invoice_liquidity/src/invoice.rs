@@ -58,6 +58,13 @@ pub struct PayerStats {
 }
 
 #[contracttype]
+#[derive(Clone, Debug)]
+pub struct ReputationScore {
+    pub score: u32,
+    pub last_activity_ledger: u32,
+}
+
+#[contracttype]
 #[derive(Clone, Debug, Default)]
 pub struct ContractStats {
     pub total_invoices: u64,
@@ -154,7 +161,7 @@ pub fn invoice_exists(env: &Env, id: u64) -> bool {
     env.storage().persistent().has(&StorageKey::Invoice(id))
 }
 
-pub fn next_invoice_id(env: pub fn next_invoice_id(env: &Env) -> u64Env) -> Result<u64, crate::ContractError> {
+pub fn next_invoice_id(env: &Env) -> u64 {
     let current: u64 = env
         .storage()
         .persistent()
@@ -166,6 +173,9 @@ pub fn next_invoice_id(env: pub fn next_invoice_id(env: &Env) -> u64Env) -> Resu
     env.storage()
         .persistent()
         .set(&StorageKey::InvoiceCount, &next);
+    env.storage()
+        .persistent()
+        .extend_ttl(&StorageKey::InvoiceCount, 1_000_000, 2_000_000);
 
     next
 }
@@ -214,6 +224,10 @@ pub fn get_payer_score(env: &Env, payer: &Address) -> u32 {
 /// Update a payer's reputation score (capped at 100)
 pub fn set_payer_score(env: &Env, payer: &Address, score: u32) {
     let score = score.min(100);
+    let rep = ReputationScore {
+        score,
+        last_activity_ledger: env.ledger().sequence(),
+    };
     env.storage()
         .persistent()
         .set(&StorageKey::PayerScore(payer.clone()), &rep);
