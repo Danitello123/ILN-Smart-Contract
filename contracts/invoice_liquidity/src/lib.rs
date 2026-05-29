@@ -1,47 +1,46 @@
 #![no_std]
 
+pub mod access;
+pub mod config;
 pub mod errors;
 pub mod events;
 pub mod invoice;
-pub mod storage;
-pub mod config;
 pub mod rate_logic;
-pub mod access;
+pub mod storage;
 use access::*;
-mod tests_regression;
+mod tests_lp_pagination;
 mod tests_new_features;
+mod tests_pagination;
+mod tests_regression;
+mod tests_xlm_support;
 
-pub use errors::ContractError;
-pub use crate::invoice::{Invoice, InvoiceParams, InvoiceStatus, ReputationScore, AppealRecord, LpFundRequest};
+pub use crate::invoice::{
+    AppealRecord, Invoice, InvoiceParams, InvoiceStatus, LpFundRequest, ReputationScore,
+};
 pub use crate::storage::DataKey;
 pub use config::{Config, ConfigError};
+pub use errors::ContractError;
 use soroban_sdk::{
     contract, contractimpl, token::Client as TokenClient, vec, Address, BytesN, Env, IntoVal,
     Symbol, Vec,
 };
 
+use crate::storage::get_admin;
 use events::{
-    AdminChanged, AppealResolved, ContractPaused, ContractUnpaused, DefaultAppealed,
-    DisputeResolved, FundQueueResolved, FundRequested, InvoiceCancelled, InvoiceDefaulted,
-    InvoiceDisputed, InvoiceFunded, InvoicePaid, InvoiceSubmitted, InvoiceTransferred,
-    InvoiceUpdated,
+    AdminChanged, AppealResolved, ContractPaused, ContractUnpaused, ContractUpgraded,
+    DefaultAppealed, DisputeResolved, FundQueueResolved, FundRequested, InvoiceCancelled,
+    InvoiceDefaulted, InvoiceDisputed, InvoiceFunded, InvoicePaid, InvoicePartiallyPaid,
+    InvoiceSubmitted, InvoiceTransferred, InvoiceUpdated, ParameterUpdated,
 };
-<<<<<<< fix/storage-key-namespacing
-use crate::storage::{
-    get_appeal, get_fund_queue, get_invoice_funders, get_lp_score, get_payer_score,
-    get_pre_default_payer_score, get_queue_resolution, invoice_exists, load_invoice,
-    next_invoice_id, save_appeal, save_fund_queue, save_invoice, save_invoice_funders,
-    save_pre_default_payer_score, save_queue_resolution, set_lp_score, set_payer_score,
-=======
 use invoice::{
-    add_volume, get_appeal, get_contract_stats, get_dispute, get_fund_queue, get_invoice_funders,
-    get_lp_score, get_payer_score, get_pre_default_payer_score, get_queue_resolution,
+    add_invoice_to_lp, add_invoice_to_submitter, add_volume, get_appeal, get_contract_stats,
+    get_dispute, get_fund_queue, get_invoice_funders, get_lp_invoices, get_lp_score,
+    get_payer_score, get_pre_default_payer_score, get_queue_resolution, get_submitter_invoices,
     increment_total_funded, increment_total_invoices, increment_total_paid, invoice_exists,
-    is_paused, load_invoice, next_invoice_id, save_appeal, save_dispute, save_fund_queue,
-    save_invoice, save_invoice_funders, save_pre_default_payer_score, save_queue_resolution,
-    set_lp_score, set_paused, set_payer_score, AppealRecord, ContractStats, DisputeRecord,
-    LpFundRequest, StorageKey,
->>>>>>> main
+    is_paused, load_invoice, next_invoice_id, remove_invoice_from_submitter, save_appeal,
+    save_dispute, save_fund_queue, save_invoice, save_invoice_funders,
+    save_pre_default_payer_score, save_queue_resolution, set_lp_score, set_paused, set_payer_score,
+    ContractStats, DisputeRecord, StorageKey,
 };
 // 30-day window in seconds for a payer to file an appeal after a default.
 const APPEAL_WINDOW_SECONDS: u64 = 30 * 24 * 60 * 60;
@@ -75,25 +74,47 @@ impl InvoiceLiquidityContract {
         token: Address,
         xlm_token: Address,
     ) -> Result<(), ContractError> {
-        if env.storage().instance().has(&crate::storage::DataKey::InvoiceCount) {
+        if env
+            .storage()
+            .instance()
+            .has(&crate::storage::DataKey::InvoiceCount)
+        {
             return Err(ContractError::AlreadyInitialized);
         }
 
-        env.storage().instance().set(&crate::storage::DataKey::Admin, &admin);
-        env.storage().instance().set(&crate::storage::DataKey::FeeRate, &0_u32);
+        env.storage()
+            .instance()
+            .set(&crate::storage::DataKey::Admin, &admin);
+        env.storage()
+            .instance()
+            .set(&crate::storage::DataKey::FeeRate, &0_u32);
         env.storage()
             .instance()
             .set(&crate::storage::DataKey::MaxDiscountRate, &5000_u32);
 
+        // Initialize config with XLM SAC address
+        let initial_config = crate::config::Config {
+            high_rep_threshold: 70,
+            bonus_bps: 100,
+            min_discount_rate_bps: 100,
+            decay_rate_bps: 50,
+            decay_period_ledgers: 10000,
+            dispute_timeout_ledgers: 10000,
+            xlm_sac_address: xlm_token.clone(),
+        };
+        crate::storage::set_config(&env, &initial_config);
+
         // approve first token (USDC or default)
-        env.storage()
-            .persistent()
-            .set(&crate::storage::DataKey::ApprovedToken(token.clone()), &true);
+        env.storage().persistent().set(
+            &crate::storage::DataKey::ApprovedToken(token.clone()),
+            &true,
+        );
 
         // approve native XLM SAC
-        env.storage()
-            .persistent()
-            .set(&crate::storage::DataKey::ApprovedToken(xlm_token.clone()), &true);
+        env.storage().persistent().set(
+            &crate::storage::DataKey::ApprovedToken(xlm_token.clone()),
+            &true,
+        );
 
         let mut list: Vec<Address> = Vec::new(&env);
         list.push_back(token.clone());
@@ -124,7 +145,19 @@ impl InvoiceLiquidityContract {
     pub fn update_fee_rate(env: Env, rate: u32) -> Result<(), ContractError> {
         require_admin(&env)?;
 
+        let old_rate: u32 = env
+            .storage()
+            .instance()
+            .get(&StorageKey::FeeRate)
+            .unwrap_or(0);
         env.storage().instance().set(&StorageKey::FeeRate, &rate);
+        let updated_by = get_admin(&env).ok_or(ContractError::Unauthorized)?;
+        env.events().publish_event(&ParameterUpdated {
+            param_name: Symbol::new(&env, "protocol_fee_rate_bps"),
+            old_value: old_rate as i128,
+            new_value: rate as i128,
+            updated_by,
+        });
         Ok(())
     }
 
@@ -132,14 +165,29 @@ impl InvoiceLiquidityContract {
     pub fn update_max_discount(env: Env, rate: u32) -> Result<(), ContractError> {
         require_admin(&env)?;
 
+        let old_rate: u32 = env
+            .storage()
+            .instance()
+            .get(&StorageKey::MaxDiscountRate)
+            .unwrap_or(0);
         env.storage()
             .instance()
             .set(&StorageKey::MaxDiscountRate, &rate);
+        let updated_by = get_admin(&env).ok_or(ContractError::Unauthorized)?;
+        env.events().publish_event(&ParameterUpdated {
+            param_name: Symbol::new(&env, "max_discount_rate_bps"),
+            old_value: old_rate as i128,
+            new_value: rate as i128,
+            updated_by,
+        });
         Ok(())
     }
 
     /// Access: Admin only
-    pub fn set_distribution_contract(env: Env, distribution_contract: Address) -> Result<(), ContractError> {
+    pub fn set_distribution_contract(
+        env: Env,
+        distribution_contract: Address,
+    ) -> Result<(), ContractError> {
         require_admin(&env)?;
 
         env.storage()
@@ -152,9 +200,10 @@ impl InvoiceLiquidityContract {
     pub fn add_token(env: Env, token: Address) -> Result<(), ContractError> {
         require_admin(&env)?;
 
-        env.storage()
-            .persistent()
-            .set(&crate::storage::DataKey::ApprovedToken(token.clone()), &true);
+        env.storage().persistent().set(
+            &crate::storage::DataKey::ApprovedToken(token.clone()),
+            &true,
+        );
 
         let mut list: Vec<Address> = env
             .storage()
@@ -206,11 +255,107 @@ impl InvoiceLiquidityContract {
     }
 
     // ------------------------------------------------------------
+    // upgrade (Issue #48)
+    // ------------------------------------------------------------
+    /// Upgrade the contract to a new WASM hash.
+    ///
+    /// Only the admin can trigger an upgrade. This function emits an event
+    /// but does not directly perform the upgrade—that is done by the network
+    /// after the contract is authorized to update its code hash via governance.
+    ///
+    /// # Arguments
+    /// - `env`: The Soroban environment
+    /// - `new_wasm_hash`: The hash of the new WASM binary to upgrade to (32 bytes)
+    ///
+    /// # Returns
+    /// - `Ok(())` if the upgrade event was successfully published
+    /// - `Err(ContractError)` if called by non-admin
+    ///
+    /// # Notes
+    /// This function:
+    /// - Requires admin authentication
+    /// - Emits a ContractUpgraded event for audit trail
+    /// - Does NOT perform the actual upgrade (handled by Soroban runtime)
+    /// - Should only be called after off-chain governance approval
+    ///
+    /// Access: Admin only
+    pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) -> Result<(), ContractError> {
+        require_admin(&env)?;
+
+        let admin = get_admin(&env).ok_or(ContractError::Unauthorized)?;
+
+        env.events().publish_event(&ContractUpgraded {
+            admin,
+            new_wasm_hash,
+            timestamp: env.ledger().timestamp(),
+        });
+
+        Ok(())
+    }
+
+    // ------------------------------------------------------------
     // get_contract_stats (read-only view)
     // ------------------------------------------------------------
     /// Access: Anyone
     pub fn get_contract_stats(env: Env) -> ContractStats {
         get_contract_stats(&env)
+    }
+
+    // ------------------------------------------------------------
+    // list_invoices_by_submitter (Paginated)
+    // ------------------------------------------------------------
+    /// Access: Anyone
+    pub fn list_invoices_by_submitter(
+        env: Env,
+        submitter: Address,
+        page: u32,
+        page_size: u32,
+    ) -> Vec<Invoice> {
+        let page_size = page_size.min(50);
+        let invoice_ids = get_submitter_invoices(&env, &submitter);
+        let total_invoices = invoice_ids.len();
+
+        let start = page * page_size;
+        if start >= total_invoices {
+            return Vec::new(&env);
+        }
+
+        let end = (start + page_size).min(total_invoices);
+        let mut result = Vec::new(&env);
+
+        for i in start..end {
+            if let Some(id) = invoice_ids.get(i) {
+                result.push_back(load_invoice(&env, id));
+            }
+        }
+
+        result
+    }
+
+    // ------------------------------------------------------------
+    // list_invoices_by_lp (Paginated)
+    // ------------------------------------------------------------
+    /// Access: Anyone
+    pub fn list_invoices_by_lp(env: Env, lp: Address, page: u32, page_size: u32) -> Vec<Invoice> {
+        let page_size = page_size.min(50);
+        let invoice_ids = get_lp_invoices(&env, &lp);
+        let total_invoices = invoice_ids.len();
+
+        let start = page * page_size;
+        if start >= total_invoices {
+            return Vec::new(&env);
+        }
+
+        let end = (start + page_size).min(total_invoices);
+        let mut result = Vec::new(&env);
+
+        for i in start..end {
+            if let Some(id) = invoice_ids.get(i) {
+                result.push_back(load_invoice(&env, id));
+            }
+        }
+
+        result
     }
 
     // ------------------------------------------------------------
@@ -245,21 +390,28 @@ impl InvoiceLiquidityContract {
 
         let id = next_invoice_id(&env);
 
+        // Capture the freelancer's reputation score at submission time
+        let submitter_reputation_at_submission = get_payer_score(&env, &freelancer);
+
         let invoice = Invoice {
             id,
-            freelancer,
+            freelancer: freelancer.clone(),
             payer,
             token,
             amount,
-            due_date,
+            due_date: due_date.try_into().unwrap(),
             discount_rate,
             status: InvoiceStatus::Pending,
             funder: None,
             funded_at: None,
             amount_funded: 0,
+            submitter_reputation_at_submission,
         };
 
         save_invoice(&env, &invoice);
+
+        // Update submitter index
+        add_invoice_to_submitter(&env, &freelancer, id);
 
         // Increment total invoices counter
         increment_total_invoices(&env);
@@ -270,7 +422,7 @@ impl InvoiceLiquidityContract {
             payer: invoice.payer.clone(),
             token: invoice.token.clone(),
             amount: invoice.amount,
-            due_date: invoice.due_date,
+            due_date: u64::from(invoice.due_date),
             discount_rate: invoice.discount_rate,
             status: invoice.status.clone(),
             timestamp: env.ledger().timestamp(),
@@ -302,7 +454,8 @@ impl InvoiceLiquidityContract {
         let mut invoice = load_invoice(&env, invoice_id);
         require_submitter_by_id(&env, &freelancer, invoice_id)?;
 
-        if invoice.status == InvoiceStatus::Pending && env.ledger().timestamp() >= invoice.due_date
+        if invoice.status == InvoiceStatus::Pending
+            && env.ledger().timestamp() >= u64::from(invoice.due_date)
         {
             invoice.status = InvoiceStatus::Expired;
             save_invoice(&env, &invoice);
@@ -325,7 +478,7 @@ impl InvoiceLiquidityContract {
         validate_invoice_terms(&env, amount, due_date, discount_rate)?;
 
         invoice.amount = amount;
-        invoice.due_date = due_date;
+        invoice.due_date = due_date.try_into().unwrap();
         invoice.discount_rate = discount_rate;
 
         save_invoice(&env, &invoice);
@@ -336,7 +489,7 @@ impl InvoiceLiquidityContract {
             payer: invoice.payer.clone(),
             token: invoice.token.clone(),
             amount: invoice.amount,
-            due_date: invoice.due_date,
+            due_date: u64::from(invoice.due_date),
             discount_rate: invoice.discount_rate,
             status: invoice.status.clone(),
         });
@@ -376,21 +529,28 @@ impl InvoiceLiquidityContract {
 
             let id = next_invoice_id(&env);
 
+            // Capture the freelancer's reputation score at submission time
+            let submitter_reputation_at_submission = get_payer_score(&env, &params.freelancer);
+
             let invoice = Invoice {
                 id,
-                freelancer: params.freelancer,
+                freelancer: params.freelancer.clone(),
                 payer: params.payer,
                 token: params.token,
                 amount: params.amount,
-                due_date: params.due_date,
+due_date: params.due_date.try_into().unwrap(),
                 discount_rate: params.discount_rate,
                 status: InvoiceStatus::Pending,
                 funder: None,
                 funded_at: None,
                 amount_funded: 0,
+                submitter_reputation_at_submission,
             };
 
             save_invoice(&env, &invoice);
+
+            // Update submitter index
+            add_invoice_to_submitter(&env, &params.freelancer, id);
 
             // Increment total invoices counter
             increment_total_invoices(&env);
@@ -401,7 +561,7 @@ impl InvoiceLiquidityContract {
                 payer: invoice.payer.clone(),
                 token: invoice.token.clone(),
                 amount: invoice.amount,
-                due_date: invoice.due_date,
+                due_date: u64::from(invoice.due_date),
                 discount_rate: invoice.discount_rate,
                 status: invoice.status.clone(),
                 timestamp: env.ledger().timestamp(),
@@ -430,11 +590,7 @@ impl InvoiceLiquidityContract {
     /// Register an LP's intent to fund an invoice.
     /// The LP's current reputation score is snapshotted for ordering.
     /// Access: LP only
-    pub fn join_fund_queue(
-        env: Env,
-        lp: Address,
-        invoice_id: u64,
-    ) -> Result<(), ContractError> {
+    pub fn join_fund_queue(env: Env, lp: Address, invoice_id: u64) -> Result<(), ContractError> {
         require_lp(&env, &lp)?;
 
         if !invoice_exists(&env, invoice_id) {
@@ -468,10 +624,17 @@ impl InvoiceLiquidityContract {
         }
 
         let score = get_lp_score(&env, &lp);
-        queue.push_back(LpFundRequest { lp: lp.clone(), score });
+        queue.push_back(LpFundRequest {
+            lp: lp.clone(),
+            score,
+        });
         save_fund_queue(&env, invoice_id, &queue);
 
-        env.events().publish_event(&FundRequested { invoice_id, lp, score });
+        env.events().publish_event(&FundRequested {
+            invoice_id,
+            lp,
+            score,
+        });
 
         Ok(())
     }
@@ -480,10 +643,7 @@ impl InvoiceLiquidityContract {
     /// Returns the winning LP address.
     /// Can be called by anyone once at least one LP has joined the queue.
     /// Access: Anyone
-    pub fn resolve_fund_queue(
-        env: Env,
-        invoice_id: u64,
-    ) -> Result<Address, ContractError> {
+    pub fn resolve_fund_queue(env: Env, invoice_id: u64) -> Result<Address, ContractError> {
         if !invoice_exists(&env, invoice_id) {
             return Err(ContractError::InvoiceNotFound);
         }
@@ -551,7 +711,8 @@ impl InvoiceLiquidityContract {
 
         let mut invoice = load_invoice(&env, invoice_id);
 
-        if invoice.status == InvoiceStatus::Pending && env.ledger().timestamp() >= invoice.due_date
+        if invoice.status == InvoiceStatus::Pending
+            && env.ledger().timestamp() >= u64::from(invoice.due_date)
         {
             invoice.status = InvoiceStatus::Expired;
             save_invoice(&env, &invoice);
@@ -577,11 +738,18 @@ impl InvoiceLiquidityContract {
         let token = token_client(&env, &invoice.token);
         let contract_address = env.current_contract_address();
 
-        let fund_discount = fund_amount
+        // Handle XLM precision if needed (SAC wrapper handles conversion internally)
+        let normalized_fund_amount = if is_xlm_token(&env, &invoice.token) {
+            normalize_xlm_amount(fund_amount)
+        } else {
+            normalize_usdc_amount(fund_amount)
+        };
+
+        let fund_discount = normalized_fund_amount
             .checked_mul(discount_rate_as_i128(invoice.discount_rate))
             .unwrap_or(0)
             / 10_000;
-        let cost = fund_amount - fund_discount;
+        let cost = normalized_fund_amount - fund_discount;
 
         token.transfer(&funder, &contract_address, &cost);
 
@@ -616,7 +784,7 @@ impl InvoiceLiquidityContract {
             token.transfer(&contract_address, &invoice.freelancer, &freelancer_payout);
 
             invoice.status = InvoiceStatus::Funded;
-            invoice.funded_at = Some(env.ledger().timestamp());
+            invoice.funded_at = Some(env.ledger().timestamp().try_into().unwrap());
             invoice.funder = Some(funder.clone());
 
             // Boost LP score on successful funding
@@ -627,6 +795,9 @@ impl InvoiceLiquidityContract {
         }
 
         save_invoice(&env, &invoice);
+
+        // Update LP index
+        add_invoice_to_lp(&env, &funder, invoice_id);
 
         // Increment total funded counter if fully funded
         if invoice.status == InvoiceStatus::Funded {
@@ -639,7 +810,7 @@ impl InvoiceLiquidityContract {
             .persistent()
             .get(&crate::storage::DataKey::TokenList)
             .unwrap_or(Vec::new(&env));
-        
+
         // Get token addresses from list, or use dummy addresses if not available
         let usdc_addr = if token_list.len() > 0 {
             token_list.get(0).unwrap()
@@ -656,14 +827,21 @@ impl InvoiceLiquidityContract {
         } else {
             invoice.token.clone()
         };
-        add_volume(&env, &invoice.token, fund_amount, &usdc_addr, &eurc_addr, &xlm_addr);
+        add_volume(
+            &env,
+            &invoice.token,
+            fund_amount,
+            &usdc_addr,
+            &eurc_addr,
+            &xlm_addr,
+        );
 
         notify_distribution_funding(&env, &funder, fund_amount);
 
         let now = env.ledger().timestamp();
 
-        let seconds_to_due = if invoice.due_date > now {
-            invoice.due_date - now
+        let seconds_to_due = if u64::from(invoice.due_date) > now {
+            u64::from(invoice.due_date) - now
         } else {
             0
         };
@@ -681,9 +859,9 @@ impl InvoiceLiquidityContract {
             fund_amount,
             amount_funded: invoice.amount_funded,
             invoice_amount: invoice.amount,
-            due_date: invoice.due_date,
+            due_date: u64::from(invoice.due_date),
             discount_rate: invoice.discount_rate,
-            funded_at: invoice.funded_at,
+            funded_at: invoice.funded_at.map(|ts| ts.into()),
             status: invoice.status.clone(),
 
             // NEW
@@ -733,6 +911,10 @@ impl InvoiceLiquidityContract {
         invoice.freelancer = new_freelancer.clone();
 
         save_invoice(&env, &invoice);
+
+        // Update submitter index
+        remove_invoice_from_submitter(&env, &old_freelancer, invoice_id);
+        add_invoice_to_submitter(&env, &new_freelancer, invoice_id);
 
         env.events().publish_event(&InvoiceTransferred {
             invoice_id,
@@ -810,7 +992,7 @@ impl InvoiceLiquidityContract {
 
         let mut invoice = load_invoice(&env, invoice_id);
 
-        if env.ledger().timestamp() < invoice.due_date {
+        if env.ledger().timestamp() < u64::from(invoice.due_date) {
             return Err(ContractError::NotYetDefaulted);
         }
 
@@ -836,9 +1018,13 @@ impl InvoiceLiquidityContract {
     // mark_paid (USES invoice.token)
     // ------------------------------------------------------------
     /// Access: Payer only
-    pub fn mark_paid(env: Env, invoice_id: u64) -> Result<(), ContractError> {
+    pub fn mark_paid(env: Env, invoice_id: u64, amount: i128) -> Result<(), ContractError> {
         if is_paused(&env) {
             return Err(ContractError::ContractPaused);
+        }
+
+        if amount <= 0 {
+            return Err(ContractError::InvalidAmount);
         }
 
         if !invoice_exists(&env, invoice_id) {
@@ -862,6 +1048,11 @@ impl InvoiceLiquidityContract {
             InvoiceStatus::Cancelled => return Err(ContractError::AlreadyCancelled),
         }
 
+        let remaining = invoice.amount - invoice.amount_paid;
+        if amount > remaining {
+            return Err(ContractError::OverpaymentRejected);
+        }
+
         let funders = get_invoice_funders(&env, invoice_id);
         if funders.len() == 0 {
             return Err(ContractError::NotFunded);
@@ -870,23 +1061,46 @@ impl InvoiceLiquidityContract {
         let token = token_client(&env, &invoice.token);
         let contract_address = env.current_contract_address();
 
-        // Payer sends full invoice amount to the contract
-        token.transfer(&invoice.payer, &contract_address, &invoice.amount);
+        // Handle XLM precision if needed (SAC wrapper handles conversion internally)
+        let normalized_amount = if is_xlm_token(&env, &invoice.token) {
+            normalize_xlm_amount(amount)
+        } else {
+            normalize_usdc_amount(amount)
+        };
 
+        // Payer sends partial/full amount to the contract
+        token.transfer(&invoice.payer, &contract_address, &normalized_amount);
+
+        invoice.amount_paid += amount;
+
+        // If not fully paid, save and emit partial event
+        if invoice.amount_paid < invoice.amount {
+            save_invoice(&env, &invoice);
+            env.events().publish_event(&InvoicePartiallyPaid {
+                invoice_id: invoice.id,
+                payer: invoice.payer.clone(),
+                amount_paid_now: amount,
+                total_amount_paid: invoice.amount_paid,
+                remaining_amount: invoice.amount - invoice.amount_paid,
+            });
+            return Ok(());
+        }
+
+        // --- FULL PAYMENT LOGIC ---
         // Calculate protocol fee and deduct it
         let fee_rate: u32 = env
             .storage()
             .instance()
             .get(&crate::storage::DataKey::FeeRate)
             .unwrap_or(0);
-        let protocol_fee = invoice
-            .amount
-            .checked_mul(fee_rate as i128)
-            .unwrap_or(0)
-            / 10_000;
+        let protocol_fee = invoice.amount.checked_mul(fee_rate as i128).unwrap_or(0) / 10_000;
 
         if protocol_fee > 0 {
-            let admin: Address = env.storage().instance().get(&crate::storage::DataKey::Admin).unwrap();
+            let admin: Address = env
+                .storage()
+                .instance()
+                .get(&crate::storage::DataKey::Admin)
+                .unwrap();
             token.transfer(&contract_address, &admin, &protocol_fee);
         }
 
@@ -899,11 +1113,10 @@ impl InvoiceLiquidityContract {
         let primary_lp_funded = funders.get(0).unwrap().1;
 
         // LP payout after settlement distribution
-        let primary_lp_payout =
-            distribute_amount
-                .checked_mul(primary_lp_funded)
-                .unwrap_or(0)
-                / invoice.amount;
+        let primary_lp_payout = distribute_amount
+            .checked_mul(primary_lp_funded)
+            .unwrap_or(0)
+            / invoice.amount;
 
         // LP earnings
         let lp_earned = primary_lp_payout - primary_lp_funded;
@@ -911,10 +1124,8 @@ impl InvoiceLiquidityContract {
         // Distribute proportionally to funders
         for i in 0..funders.len() {
             let (funder_addr, fund_amt) = funders.get(i).unwrap();
-            let funder_share = distribute_amount
-                .checked_mul(fund_amt)
-                .unwrap_or(0)
-                / invoice.amount;
+            let funder_share =
+                distribute_amount.checked_mul(fund_amt).unwrap_or(0) / invoice.amount;
             if funder_share > 0 {
                 token.transfer(&contract_address, &funder_addr, &funder_share);
             }
@@ -928,7 +1139,7 @@ impl InvoiceLiquidityContract {
         // Increment total paid counter
         increment_total_paid(&env);
 
-        let paid_on_time = env.ledger().timestamp() <= invoice.due_date;
+        let paid_on_time = env.ledger().timestamp() <= u64::from(invoice.due_date);
         notify_distribution_settlement(&env, &invoice.freelancer, &invoice.payer, paid_on_time);
 
         // --- Update payer reputation ---
@@ -971,9 +1182,9 @@ impl InvoiceLiquidityContract {
         }
 
         match invoice.status {
-            InvoiceStatus::Pending
-            | InvoiceStatus::PartiallyFunded
-            | InvoiceStatus::Funded => Ok(0),
+            InvoiceStatus::Pending | InvoiceStatus::PartiallyFunded | InvoiceStatus::Funded => {
+                Ok(0)
+            }
             InvoiceStatus::Defaulted => Err(ContractError::InvoiceDefaulted),
             InvoiceStatus::Appealed => Err(ContractError::InvoiceAppealed),
             InvoiceStatus::Disputed => Err(ContractError::InvoiceDisputed),
@@ -1021,7 +1232,7 @@ impl InvoiceLiquidityContract {
         }
 
         let now = env.ledger().timestamp();
-        if now < invoice.due_date {
+        if now < u64::from(invoice.due_date) {
             return Err(ContractError::NotYetDefaulted);
         }
 
@@ -1076,7 +1287,7 @@ impl InvoiceLiquidityContract {
             payer: invoice.payer.clone(),
             token: invoice.token.clone(),
             amount: invoice.amount,
-            due_date: invoice.due_date,
+            due_date: u64::from(invoice.due_date),
             defaulted_at: now,
             discount_amount: total_refunded,
             status: invoice.status.clone(),
@@ -1131,7 +1342,7 @@ impl InvoiceLiquidityContract {
 
         // Appeal must be filed within the appeal window after default.
         // A default can only occur after due_date, so we measure from due_date.
-        if now > invoice.due_date + APPEAL_WINDOW_SECONDS {
+        if now > u64::from(invoice.due_date) + APPEAL_WINDOW_SECONDS {
             return Err(ContractError::AppealWindowClosed);
         }
 
@@ -1170,13 +1381,7 @@ impl InvoiceLiquidityContract {
     ///   can still collect principal they were already refunded. The key effect is reputation repair.
     /// * `upheld=false` → reject the appeal; invoice remains Defaulted (status reverts from Appealed).
     /// Access: Admin only
-    pub fn resolve_appeal(
-        env: Env,
-        invoice_id: u64,
-        upheld: bool,
-    ) -> Result<(), ContractError> {
-
-
+    pub fn resolve_appeal(env: Env, invoice_id: u64, upheld: bool) -> Result<(), ContractError> {
         if !invoice_exists(&env, invoice_id) {
             return Err(ContractError::InvoiceNotFound);
         }
@@ -1367,12 +1572,12 @@ impl InvoiceLiquidityContract {
         }
 
         let dispute = get_dispute(&env, invoice_id).ok_or(ContractError::InvoiceNotFound)?;
-        let config = crate::config::get_config(&env).map_err(|_| ContractError::Unauthorized)?;
+        let config = crate::storage::get_config(&env).ok_or(ContractError::Unauthorized)?;
 
         let now_ledger = env.ledger().sequence();
-        
+
         if u64::from(now_ledger) < dispute.disputed_at + config.dispute_timeout_ledgers {
-             return Err(ContractError::Unauthorized); // Or a more specific error like TimeoutNotReached
+            return Err(ContractError::Unauthorized); // Or a more specific error like TimeoutNotReached
         }
 
         // Auto-resolve: Default to Rejected (Freelancer right) to prevent DOS.
@@ -1409,6 +1614,7 @@ impl InvoiceLiquidityContract {
         decay_rate_bps: u32,
         decay_period_ledgers: u64,
         dispute_timeout_ledgers: u64,
+        xlm_sac_address: Address,
     ) -> Result<(), ContractError> {
         crate::config::update_config(
             &env,
@@ -1419,12 +1625,13 @@ impl InvoiceLiquidityContract {
             decay_rate_bps,
             decay_period_ledgers,
             dispute_timeout_ledgers,
+            xlm_sac_address,
         )
         .map_err(|_| ContractError::Unauthorized)
     }
 
     pub fn get_config(env: Env) -> Result<Config, ContractError> {
-        crate::config::get_config(&env).map_err(|_| ContractError::Unauthorized)
+        crate::storage::get_config(&env).ok_or(ContractError::Unauthorized)
     }
     // payer_score
     // ----------------------------------------------------------------
@@ -1493,6 +1700,39 @@ fn discount_rate_as_i128(rate: u32) -> i128 {
     rate as i128
 }
 
+// ----------------------------------------------------------------
+// XLM PRECISION HANDLING
+// ----------------------------------------------------------------
+// XLM has 7 decimal places (1 XLM = 10,000,000 stroops)
+// USDC has 6 decimal places (1 USDC = 1,000,000 units)
+// These helpers ensure correct precision handling
+
+const XLM_DECIMALS: u32 = 7;
+const USDC_DECIMALS: u32 = 6;
+
+/// Check if a token address is the XLM SAC address
+fn is_xlm_token(env: &Env, token: &Address) -> bool {
+    if let Some(config) = crate::storage::get_config(env) {
+        token == &config.xlm_sac_address
+    } else {
+        false
+    }
+}
+
+/// Convert amount from XLM precision (7 decimals) to contract precision
+/// This is a no-op for now since we store amounts in their native token precision,
+/// but provides a hook for future precision normalization if needed
+fn normalize_xlm_amount(amount: i128) -> i128 {
+    amount
+}
+
+/// Convert amount from USDC precision (6 decimals) to contract precision
+/// This is a no-op for now since we store amounts in their native token precision,
+/// but provides a hook for future precision normalization if needed
+fn normalize_usdc_amount(amount: i128) -> i128 {
+    amount
+}
+
 fn validate_invoice_terms(
     env: &Env,
     amount: i128,
@@ -1512,8 +1752,13 @@ fn validate_invoice_terms(
         return Err(ContractError::InvalidDiscountRate);
     }
 
+    // The on-chain storage representation now uses u32 timestamps.
+    if due_date > u64::from(u32::MAX) {
+        return Err(ContractError::InvalidDueDate);
+    }
+
     let now = env.ledger().timestamp();
-    
+
     // Validate due date is in the future
     if due_date <= now {
         return Err(ContractError::InvalidDueDate);
@@ -1582,24 +1827,24 @@ fn notify_distribution_settlement(
 // ----------------------------------------------------------------
 
 mod test;
+#[cfg(test)]
+mod tests_access_control;
 mod tests_appeal;
 mod tests_arithmetic;
 mod tests_auth;
+mod tests_dispute;
 mod tests_distribution;
 mod tests_invariants;
+#[cfg(test)]
+mod tests_invoice_paid_event;
+#[cfg(test)]
+mod tests_lp_funding_details_event;
 mod tests_lp_priority_queue;
 mod tests_mutation;
+#[cfg(test)]
+mod tests_partial_payment;
 mod tests_protocol_fee;
 mod tests_security;
 mod tests_state_machine;
 mod tests_storage;
-#[cfg(test)]
-mod tests_invoice_paid_event;
-<<<<<<< fix/storage-key-namespacing
-=======
-mod tests_dispute;
-// mod tests_reputation_edge_cases;
->>>>>>> main
-#[cfg(test)]
-mod tests_lp_funding_details_event;#[cfg(test)]
-mod tests_access_control;
+mod tests_storage_extra;

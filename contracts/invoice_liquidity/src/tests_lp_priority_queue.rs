@@ -71,7 +71,16 @@ fn setup_queue() -> QueueTestEnv {
     ledger.timestamp = 1_700_000_000;
     env.ledger().set(ledger);
 
-    QueueTestEnv { env, contract, token, freelancer, payer, lp_a, lp_b, lp_c }
+    QueueTestEnv {
+        env,
+        contract,
+        token,
+        freelancer,
+        payer,
+        lp_a,
+        lp_b,
+        lp_c,
+    }
 }
 
 fn submit_invoice(t: &QueueTestEnv) -> u64 {
@@ -280,7 +289,7 @@ fn test_full_queue_lifecycle_with_payout() {
     assert_eq!(winner, t.lp_a);
 
     t.contract.fund_invoice(&t.lp_a, &id, &INVOICE_AMOUNT);
-    t.contract.mark_paid(&id);
+    t.contract.mark_paid(&id, &INVOICE_AMOUNT);
 
     let invoice = t.contract.get_invoice(&id);
     assert_eq!(invoice.status, InvoiceStatus::Paid);

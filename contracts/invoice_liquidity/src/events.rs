@@ -1,4 +1,4 @@
-use soroban_sdk::{contractevent, Address, BytesN};
+use soroban_sdk::{contractevent, Address, BytesN, Symbol};
 
 use crate::invoice::InvoiceStatus;
 
@@ -97,6 +97,32 @@ pub struct InvoicePaid {
     pub status: InvoiceStatus,
 }
 
+#[contractevent(topics = ["partially_paid"])]
+#[derive(Clone, Debug, PartialEq)]
+pub struct InvoicePartiallyPaid {
+    #[topic]
+    pub invoice_id: u64,
+
+    #[topic]
+    pub payer: Address,
+
+    pub amount_paid_now: i128,
+    pub total_amount_paid: i128,
+    pub remaining_amount: i128,
+}
+
+#[contractevent(topics = ["paused"])]
+#[derive(Clone, Debug, PartialEq)]
+pub struct ContractPaused {
+    pub timestamp: u64,
+}
+
+#[contractevent(topics = ["unpaused"])]
+#[derive(Clone, Debug, PartialEq)]
+pub struct ContractUnpaused {
+    pub timestamp: u64,
+}
+
 #[contractevent(topics = ["defaulted"])]
 #[derive(Clone, Debug, PartialEq)]
 pub struct InvoiceDefaulted {
@@ -144,15 +170,27 @@ pub struct AdminChanged {
     pub timestamp: u64,
 }
 
-#[contractevent(topics = ["paused"])]
+/// Emitted whenever a governance-controlled numeric parameter changes.
+///
+/// The `param_name` topic is a stable audit identifier. Keep these strings
+/// unique per parameter so off-chain indexers can reconstruct config history.
+#[contractevent(topics = ["parameter_updated"])]
 #[derive(Clone, Debug, PartialEq)]
-pub struct ContractPaused {
-    pub timestamp: u64,
+pub struct ParameterUpdated {
+    #[topic]
+    pub param_name: Symbol,
+    pub old_value: i128,
+    pub new_value: i128,
+    #[topic]
+    pub updated_by: Address,
 }
 
-#[contractevent(topics = ["unpaused"])]
+#[contractevent(topics = ["upgraded"])]
 #[derive(Clone, Debug, PartialEq)]
-pub struct ContractUnpaused {
+pub struct ContractUpgraded {
+    #[topic]
+    pub admin: Address,
+    pub new_wasm_hash: BytesN<32>,
     pub timestamp: u64,
 }
 
@@ -207,7 +245,7 @@ pub struct DisputeResolved {
     pub invoice_id: u64,
     #[topic]
     pub resolution_hash: BytesN<32>, // Optional hash of resolution details
-    pub resolution: u32,             // Ruling: 1 = Upheld (Payer right), 2 = Rejected (Freelancer right)
+    pub resolution: u32, // Ruling: 1 = Upheld (Payer right), 2 = Rejected (Freelancer right)
     pub resolved_at: u64,
 }
 

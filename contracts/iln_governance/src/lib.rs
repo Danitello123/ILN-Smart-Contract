@@ -107,6 +107,33 @@ pub struct GovernanceProposal {
 }
 
 // ================================================================
+// Issue #70: ProposalCreated / ProposalExecuted events
+// ================================================================
+
+#[contractevent(topics = ["proposal_created"])]
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProposalCreated {
+    #[topic]
+    pub proposal_id: u64,
+    pub proposer: Address,
+    pub action_type: ProposalAction,
+    pub proposed_value: i128,
+    pub created_at: u64,
+    pub voting_end: u64,
+}
+
+#[contractevent(topics = ["proposal_executed"])]
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProposalExecuted {
+    #[topic]
+    pub proposal_id: u64,
+    pub action_type: ProposalAction,
+    pub proposed_value: i128,
+    pub votes_for: i128,
+    pub votes_against: i128,
+}
+
+// ================================================================
 // Issue #61: VoteCast event
 // ================================================================
 
@@ -133,6 +160,8 @@ pub enum StorageKey {
     GovToken,
     Proposal(u64),
     ProposalCount,
+    /// Proposal-scoped voting-power snapshot keyed by voter.
+    VoteWeightSnapshot(u64, Address),
     /// Issue #61: per-(voter, proposal_id) double-vote guard.
     HasVoted(u64, Address),
 }
@@ -198,7 +227,7 @@ impl GovContract {
 
         let proposal = GovernanceProposal {
             id,
-            proposer,
+            proposer: proposer.clone(),
             description_hash,
             action_type,
             proposed_value,
@@ -209,12 +238,29 @@ impl GovContract {
             voting_end,
         };
 
+        let token_addr: Address = env.storage().instance().get(&StorageKey::GovToken).unwrap();
+        let token = TokenClient::new(&env, &token_addr);
+        let proposer_weight = token.balance(&proposer);
+        env.storage().persistent().set(
+            &StorageKey::VoteWeightSnapshot(id, proposer.clone()),
+            &proposer_weight,
+        );
+
         env.storage()
             .persistent()
             .set(&StorageKey::Proposal(id), &proposal);
         env.storage()
             .instance()
             .set(&StorageKey::ProposalCount, &id);
+
+        env.events().publish_event(&ProposalCreated {
+            proposal_id: id,
+            proposer,
+            action_type: proposal.action_type.clone(),
+            proposed_value,
+            created_at: now,
+            voting_end,
+        });
 
         Ok(id)
     }
@@ -226,7 +272,9 @@ impl GovContract {
     /// * `proposal_id` – the proposal to vote on
     /// * `support`     – true = vote for, false = vote against
     ///
-    /// Vote weight equals the caller's current governance-token balance.
+    /// Vote weight uses the stored checkpoint for this proposal/voter pair.
+    /// If no checkpoint exists yet, the current balance is recorded once and
+    /// reused for the remainder of the proposal.
     /// Returns `GovernanceError::AlreadyVoted` if the caller has already voted.
     pub fn cast_vote(
         env: Env,
@@ -256,13 +304,17 @@ impl GovContract {
             return Err(GovernanceError::AlreadyVoted);
         }
 
-        let token_addr: Address = env
-            .storage()
-            .instance()
-            .get(&StorageKey::GovToken)
-            .unwrap();
+        let token_addr: Address = env.storage().instance().get(&StorageKey::GovToken).unwrap();
         let token = TokenClient::new(&env, &token_addr);
-        let weight = token.balance(&voter);
+        let snapshot_key = StorageKey::VoteWeightSnapshot(proposal_id, voter.clone());
+        let weight: i128 = match env.storage().persistent().get(&snapshot_key) {
+            Some(weight) => weight,
+            None => {
+                let current = token.balance(&voter);
+                env.storage().persistent().set(&snapshot_key, &current);
+                current
+            }
+        };
         if weight == 0 {
             return Err(GovernanceError::NoVotingPower);
         }
@@ -358,11 +410,7 @@ impl GovContract {
             }
             ProposalAction::RemoveToken(token) => {
                 let args: Vec<soroban_sdk::Val> = vec![&env, token.into_val(&env)];
-                env.invoke_contract::<()>(
-                    &iln_contract,
-                    &Symbol::new(&env, "remove_token"),
-                    args,
-                );
+                env.invoke_contract::<()>(&iln_contract, &Symbol::new(&env, "remove_token"), args);
             }
             ProposalAction::UpdateMaxDiscountRate(rate) => {
                 let args: Vec<soroban_sdk::Val> = vec![&env, rate.into_val(&env)];
@@ -379,16 +427,21 @@ impl GovContract {
             .persistent()
             .set(&StorageKey::Proposal(proposal_id), &proposal);
 
+        env.events().publish_event(&ProposalExecuted {
+            proposal_id,
+            action_type: proposal.action_type,
+            proposed_value: proposal.proposed_value,
+            votes_for: proposal.votes_for,
+            votes_against: proposal.votes_against,
+        });
+
         Ok(())
     }
 
     // ── Getters ──────────────────────────────────────────────────
 
     /// Issue #59: get_proposal(id) → GovernanceProposal
-    pub fn get_proposal(
-        env: Env,
-        proposal_id: u64,
-    ) -> Result<GovernanceProposal, GovernanceError> {
+    pub fn get_proposal(env: Env, proposal_id: u64) -> Result<GovernanceProposal, GovernanceError> {
         env.storage()
             .persistent()
             .get(&StorageKey::Proposal(proposal_id))
@@ -402,3 +455,10 @@ impl GovContract {
             .has(&StorageKey::HasVoted(proposal_id, voter))
     }
 }
+
+#[cfg(test)]
+mod test;
+
+#[cfg(test)]
+#[path = "../../tests/governance_lifecycle_test.rs"]
+mod governance_lifecycle_test;

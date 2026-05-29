@@ -190,8 +190,8 @@ fn test_overflow_boundary_half_max_amount_no_panic() {
 fn test_payout_never_negative_for_valid_inputs() {
     // Pairs of (amount, discount_rate) that pass validation
     let valid_cases: &[(i128, u32)] = &[
-        (1_000_000, 1),                 // minimum plausible values
-        (1_000_000, 5_000),             // min amount, max rate
+        (1_000_000, 1),         // minimum plausible values
+        (1_000_000, 5_000),     // min amount, max rate
         (1_000_000_000, 300),   // standard 100 USDC @ 3%
         (1_000_000_000, 5_000), // standard amount, max rate
         (10_000_000_000, 1),    // large amount, tiny rate
@@ -336,7 +336,7 @@ fn test_storage_isolation_adjacent_invoice_ids() {
 
     // Fully cycle invoice 1: fund -> mark paid
     t.contract.fund_invoice(&new_funder, &id_1, &1_000_000_000);
-    t.contract.mark_paid(&id_1);
+    t.contract.mark_paid(&id_1, &1_000_000_000);
 
     let inv1 = t.contract.get_invoice(&id_1);
     let inv2 = t.contract.get_invoice(&id_2);

@@ -1,11 +1,14 @@
 #![no_std]
 
 pub mod config;
+pub mod events;
 pub mod invoice;
 pub mod rate_logic;
 pub mod reputation;
 pub mod errors;
 
+use crate::config::{get_config, set_admin, set_config, update_config, Config, ConfigError};
+use crate::invoice::{get_reputation, set_reputation, submit_invoice, Invoice, InvoiceError};
 use soroban_sdk::{contract, contractimpl, Address, Env};
 use crate::config::{Config, update_config, get_config, set_config, set_admin};
 use crate::invoice::{Invoice, submit_invoice, mark_paid, handle_default};

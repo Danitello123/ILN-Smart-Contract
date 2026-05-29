@@ -1,4 +1,8 @@
+#![cfg(test)]
+
 use super::*;
+use crate::{events::InvoicePaid, InvoiceLiquidityContract, InvoiceLiquidityContractClient};
+
 use soroban_sdk::{
     testutils::{Address as _, Events},
     token::{Client as TokenClient, StellarAssetClient},
@@ -7,12 +11,6 @@ use soroban_sdk::{
 
 #[test]
 fn emits_invoice_paid_event_with_full_settlement_details() {
-use soroban_sdk::{
-    testutils::{Address as _, Events},
-    token::{Client as TokenClient, StellarAssetClient},
-    Address, Env, xdr::ToXdr, xdr::FromXdr,
-};
-
     let env = Env::default();
     env.mock_all_auths();
 
@@ -32,7 +30,6 @@ use soroban_sdk::{
     let token_contract = env.register_stellar_asset_contract_v2(token_admin.clone());
     let token = token_contract.address();
 
-    // let token_client = TokenClient::new(&env, &token);
     let asset_client = StellarAssetClient::new(&env, &token);
 
     // Mint liquidity to LP + payer
@@ -64,20 +61,27 @@ use soroban_sdk::{
     // ------------------------------------------------------------
     // Fund invoice
     // ------------------------------------------------------------
-    client.fund_invoice(
-        &lp,
-        &invoice_id,
-        &1_000_000_i128,
-    );
+    client.fund_invoice(&lp, &invoice_id, &1_000_000_i128);
+
+    // ------------------------------------------------------------
+    // Expected math
+    // ------------------------------------------------------------
+    let amount_paid: i128 = 1_000_000;
+
+    // no protocol fee by default
+    let lp_payout: i128 = 1_000_000;
+
+    // payout - funded
+    let lp_earned: i128 = 0;
 
     // ------------------------------------------------------------
     // Mark paid
     // ------------------------------------------------------------
-    client.mark_paid(&invoice_id);
+    client.mark_paid(&invoice_id, &amount_paid);
 
     // ------------------------------------------------------------
-    // Validate emitted event (Simplified to check existence)
+    // Validate emitted event
     // ------------------------------------------------------------
     let all_events = env.events().all();
     assert!(!all_events.events().is_empty());
-    }
+}

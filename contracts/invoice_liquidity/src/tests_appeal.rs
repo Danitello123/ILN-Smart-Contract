@@ -162,7 +162,10 @@ fn test_resolve_appeal_upheld_restores_payer_score() {
     t.contract.resolve_appeal(&id, &true);
 
     let score_after_upheld = t.contract.payer_score(&t.payer);
-    assert_eq!(score_after_upheld, 50, "Score should be restored after upheld appeal");
+    assert_eq!(
+        score_after_upheld, 50,
+        "Score should be restored after upheld appeal"
+    );
 }
 
 #[test]
@@ -272,7 +275,7 @@ fn test_mark_paid_appealed_invoice_fails() {
 
     t.contract.appeal_default(&id, &evidence_hash(&t.env));
 
-    let result = t.contract.try_mark_paid(&id);
+    let result = t.contract.try_mark_paid(&id, &INVOICE_AMOUNT);
     assert_eq!(result, Err(Ok(ContractError::InvoiceAppealed)));
 }
 
