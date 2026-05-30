@@ -12,6 +12,9 @@ pub mod rate_logic;
 pub mod storage;
 pub mod top_payers;
 use access::*;
+pub mod constants;
+#[cfg(test)]
+mod tests_discount_rate;
 mod tests_lp_pagination;
 mod tests_new_features;
 mod tests_pagination;
@@ -55,8 +58,9 @@ use invoice::{
     increment_total_paid, invoice_exists, is_paused, load_invoice, next_invoice_id,
     remove_invoice_from_submitter, save_appeal, save_dispute, save_fund_queue, save_invoice,
     save_invoice_funders, save_pre_default_payer_score, save_queue_resolution, set_lp_score,
-    set_min_payer_reputation, set_paused, set_payer_score, try_load_invoice, ContractStats,
-    DisputeRecord, StorageKey,
+    set_min_payer_reputation, set_paused, set_payer_score, set_reputation, try_load_invoice,
+    ContractStats, DisputeRecord, StorageKey, increment_invoices_submitted, increment_invoices_paid,
+    increment_invoices_defaulted,
 };
 // 30-day window in seconds for a payer to file an appeal after a default.
 const APPEAL_WINDOW_SECONDS: u64 = 30 * 24 * 60 * 60;
@@ -109,7 +113,9 @@ impl InvoiceLiquidityContract {
             .set(&crate::storage::DataKey::MaxDiscountRate, &5000_u32);
 
         if !env.storage().instance().has(&StorageKey::NextInvoiceId) {
-            env.storage().instance().set(&StorageKey::NextInvoiceId, &1_u64);
+            env.storage()
+                .instance()
+                .set(&StorageKey::NextInvoiceId, &1_u64);
         }
 
         // Initialize config with XLM SAC address
@@ -476,6 +482,9 @@ impl InvoiceLiquidityContract {
         // Increment total invoices counter
         increment_total_invoices(&env);
 
+        // Increment detailed reputation invoices_submitted count
+        increment_invoices_submitted(&env, &freelancer);
+
         env.events().publish_event(&InvoiceSubmitted {
             invoice_id: invoice.id,
             freelancer: invoice.freelancer.clone(),
@@ -779,8 +788,7 @@ impl InvoiceLiquidityContract {
         // Issue #28: reject funding when the payer's reputation is below the
         // configured minimum threshold (default 0 allows everyone).
         let min_payer_reputation = get_min_payer_reputation(&env);
-        if min_payer_reputation > 0
-            && get_payer_score(&env, &invoice.payer) < min_payer_reputation
+        if min_payer_reputation > 0 && get_payer_score(&env, &invoice.payer) < min_payer_reputation
         {
             return Err(ContractError::PayerReputationTooLow);
         }
@@ -1198,6 +1206,10 @@ impl InvoiceLiquidityContract {
         let current_score = get_payer_score(&env, &invoice.payer);
         set_payer_score(&env, &invoice.payer, current_score + 1);
 
+        // Increment detailed reputation invoices_paid count for both payer and freelancer
+        increment_invoices_paid(&env, &invoice.payer);
+        increment_invoices_paid(&env, &invoice.freelancer);
+
         env.events().publish_event(&InvoicePaid {
             invoice_id: invoice.id,
             payer: invoice.payer.clone(),
@@ -1332,6 +1344,9 @@ impl InvoiceLiquidityContract {
             set_payer_score(&env, &invoice.payer, 0);
         }
 
+        // Increment detailed reputation invoices_defaulted count for the payer
+        increment_invoices_defaulted(&env, &invoice.payer);
+
         env.events().publish_event(&InvoiceDefaulted {
             invoice_id: invoice.id,
             funder,
@@ -1451,6 +1466,12 @@ impl InvoiceLiquidityContract {
         if upheld {
             // Restore the payer's reputation to what it was before the default.
             set_payer_score(&env, &invoice.payer, appeal.pre_default_score);
+
+            // Decrement invoices_defaulted count since the default was reversed
+            let mut profile = get_reputation(&env, &invoice.payer);
+            profile.invoices_defaulted = profile.invoices_defaulted.saturating_sub(1);
+            set_reputation(&env, &profile);
+
             // Status moves back to Defaulted — the LP still received their refund,
             // but the reputational penalty on the payer is reversed.
             invoice.status = InvoiceStatus::Defaulted;
@@ -1778,7 +1799,7 @@ impl InvoiceLiquidityContract {
 
     /// Access: Anyone
     pub fn get_invoice_count(env: Env) -> u64 {
-        get_contract_stats(&env).total_invoices
+        crate::invoice::read_next_invoice_id(&env) - 1
     }
 }
 
@@ -1920,16 +1941,16 @@ fn notify_distribution_settlement(
 // TEST MODULES
 // ----------------------------------------------------------------
 
-mod test;
+pub(crate) mod test;
 #[cfg(test)]
 mod tests_access_control;
-#[cfg(test)]
-mod tests_governance_features;
 mod tests_appeal;
 mod tests_arithmetic;
 mod tests_auth;
 mod tests_dispute;
 mod tests_distribution;
+#[cfg(test)]
+mod tests_governance_features;
 mod tests_invariants;
 #[cfg(test)]
 mod tests_invoice_paid_event;
@@ -1950,3 +1971,5 @@ mod tests_benchmarks;
 mod tests_top_payers;
 #[cfg(test)]
 mod tests_lazy_storage;
+#[cfg(test)]
+mod tests_reputation_events;
