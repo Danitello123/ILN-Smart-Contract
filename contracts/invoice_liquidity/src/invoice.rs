@@ -1,4 +1,4 @@
-use crate::storage::DataKey as StorageKey;
+pub use crate::storage::DataKey as StorageKey;
 use soroban_sdk::{contracttype, Address, BytesN, Env, IntoVal, Symbol};
 
 // ----------------------------------------------------------------
@@ -86,7 +86,7 @@ pub struct ReputationProfile {
 }
 
 #[contracttype]
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct ContractStats {
     pub total_invoices: u64,
     pub total_funded: u64,
@@ -103,7 +103,7 @@ pub struct ContractStats {
 // ----------------------------------------------------------------
 
 #[contracttype]
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct AppealRecord {
     /// SHA-256 hash of off-chain evidence submitted by the payer.
     pub evidence_hash: BytesN<32>,
@@ -119,7 +119,7 @@ pub struct AppealRecord {
 // ----------------------------------------------------------------
 
 #[contracttype]
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct DisputeRecord {
     /// SHA-256 hash of off-chain dispute evidence.
     pub reason_hash: BytesN<32>,
@@ -554,6 +554,20 @@ pub fn add_volume(env: &Env, token: &Address, amount: i128) {
     );
 
     // Preserve legacy aggregate token counters for compatibility.
+    if let Some(config) = crate::storage::get_config(env) {
+        if token == &config.xlm_sac_address {
+            let current: i128 = env
+                .storage()
+                .persistent()
+                .get(&StorageKey::TotalVolumeXlm)
+                .unwrap_or(0);
+            env.storage()
+                .persistent()
+                .set(&StorageKey::TotalVolumeXlm, &(current + amount));
+            return;
+        }
+    }
+
     let token_list: soroban_sdk::Vec<Address> = env
         .storage()
         .persistent()
