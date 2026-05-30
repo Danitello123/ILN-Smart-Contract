@@ -1,6 +1,6 @@
 {
   "generators": {
-    "address": 8,
+    "address": 7,
     "nonce": 0,
     "mux_id": 0
   },
@@ -108,10 +108,10 @@
                 {
                   "vec": [
                     {
-                      "symbol": "RemoveToken"
+                      "symbol": "UpdateFeeRate"
                     },
                     {
-                      "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAARQG5"
+                      "u32": 200
                     }
                   ]
                 },
@@ -119,7 +119,7 @@
                   "bytes": "0101010101010101010101010101010101010101010101010101010101010101"
                 },
                 {
-                  "i128": "0"
+                  "i128": "200"
                 }
               ]
             }
@@ -128,12 +128,13 @@
         }
       ]
     ],
+    [],
     []
   ],
   "ledger": {
     "protocol_version": 25,
     "sequence_number": 0,
-    "timestamp": 1700000000,
+    "timestamp": 1700259201,
     "network_id": "0000000000000000000000000000000000000000000000000000000000000000",
     "base_reserve": 0,
     "min_persistent_entry_ttl": 4096,
@@ -311,10 +312,10 @@
                     "val": {
                       "vec": [
                         {
-                          "symbol": "RemoveToken"
+                          "symbol": "UpdateFeeRate"
                         },
                         {
-                          "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAARQG5"
+                          "u32": 200
                         }
                       ]
                     }
@@ -356,7 +357,7 @@
                       "symbol": "proposed_value"
                     },
                     "val": {
-                      "i128": "0"
+                      "i128": "200"
                     }
                   },
                   {
