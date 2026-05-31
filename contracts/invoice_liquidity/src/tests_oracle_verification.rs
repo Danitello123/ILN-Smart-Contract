@@ -9,31 +9,38 @@
 
 use super::*;
 use crate::test::{setup, DISCOUNT_RATE, DUE_DATE_OFFSET, INVOICE_AMOUNT};
-use soroban_sdk::{contract, contractimpl, testutils::Address as _, Address, Env};
+use soroban_sdk::{contract, contractimpl, testutils::{Address as _, Ledger as _}, Address, Env};
 
 // ----------------------------------------------------------------
-// Mock oracle: always returns verified = true
+// Mock oracle: always returns verified = true with a fresh timestamp.
+// "Fresh" means timestamp == current ledger sequence at call time.
 // ----------------------------------------------------------------
 #[contract]
 struct MockVerifiedOracle;
 
 #[contractimpl]
 impl MockVerifiedOracle {
-    pub fn is_verified(_env: Env, _payer: Address) -> bool {
-        true
+    pub fn get_payer_data(env: Env, _payer: Address) -> OracleVerificationResponse {
+        OracleVerificationResponse {
+            is_verified: true,
+            timestamp: env.ledger().sequence(),
+        }
     }
 }
 
 // ----------------------------------------------------------------
-// Mock oracle: always returns verified = false
+// Mock oracle: always returns verified = false with a fresh timestamp.
 // ----------------------------------------------------------------
 #[contract]
 struct MockUnverifiedOracle;
 
 #[contractimpl]
 impl MockUnverifiedOracle {
-    pub fn is_verified(_env: Env, _payer: Address) -> bool {
-        false
+    pub fn get_payer_data(env: Env, _payer: Address) -> OracleVerificationResponse {
+        OracleVerificationResponse {
+            is_verified: false,
+            timestamp: env.ledger().sequence(),
+        }
     }
 }
 
