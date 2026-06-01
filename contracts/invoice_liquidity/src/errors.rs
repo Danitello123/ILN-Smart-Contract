@@ -53,4 +53,11 @@ pub enum ContractError {
     /// Issue #93: oracle data is older than max_oracle_age_ledgers and must
     /// be rejected to prevent stale-data attacks.
     OracleDataStale = 34,
+    // ── Invoice NFT Operations ──────────────────────────────────
+    /// NFT already exists for this invoice (should not happen in normal flow).
+    InvoiceNftAlreadyExists = 35,
+    /// NFT does not exist for the requested invoice.
+    InvoiceNftNotFound = 36,
+    /// Caller is not the owner of the NFT.
+    InvoiceNftNotOwned = 37,
 }

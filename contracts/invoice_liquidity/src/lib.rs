@@ -12,6 +12,7 @@ pub mod config;
 pub mod errors;
 pub mod events;
 pub mod invoice;
+pub mod nft;
 pub mod rate_logic;
 pub mod storage;
 pub mod top_payers;
@@ -31,11 +32,14 @@ mod tests_error_cases;
 mod tests_stress;
 #[cfg(test)]
 mod tests_lifecycle_integration;
+#[cfg(test)]
+mod tests_invoice_nft;
 
 pub use crate::invoice::{
     AppealRecord, Invoice, InvoiceParams, InvoiceStatus, LpFundRequest, ReputationProfile,
     ReputationScore, TopPayerEntry,
 };
+pub use crate::nft::InvoiceNftMetadata;
 pub use crate::storage::DataKey;
 pub use config::{Config, ConfigError};
 pub use errors::ContractError;
@@ -569,6 +573,17 @@ impl InvoiceLiquidityContract {
         // Increment detailed reputation invoices_submitted count
         increment_invoices_submitted(&env, &freelancer);
 
+        // Issue #119: Mint NFT representing the invoice to the freelancer
+        crate::nft::mint_invoice_nft(
+            &env,
+            id,
+            freelancer.clone(),
+            amount,
+            due_date.try_into().unwrap(),
+            discount_rate,
+            token.clone(),
+        )?;
+
         env.events().publish_event(&InvoiceSubmitted {
             invoice_id: invoice.id,
             freelancer: invoice.freelancer.clone(),
@@ -1068,6 +1083,11 @@ impl InvoiceLiquidityContract {
 
         save_invoice(&env, &invoice);
 
+        // Issue #119: Transfer NFT to the LP when invoice is fully funded
+        if invoice.status == InvoiceStatus::Funded {
+            crate::nft::transfer_invoice_nft(&env, invoice_id, invoice.freelancer.clone(), funder.clone())?;
+        }
+
         // Update LP index
         add_invoice_to_lp(&env, &funder, invoice_id);
 
@@ -1220,6 +1240,10 @@ impl InvoiceLiquidityContract {
 
         invoice.funder = Some(new_lp.clone());
         save_invoice(&env, &invoice);
+
+        // Issue #119: Transfer NFT to the new LP when LP position is transferred
+        // The NFT represents the LP's claim on the invoice
+        crate::nft::transfer_invoice_nft(&env, invoice_id, current_lp.clone(), new_lp.clone())?;
 
         remove_invoice_from_lp(&env, &current_lp, invoice_id);
         add_invoice_to_lp(&env, &new_lp, invoice_id);
@@ -1446,6 +1470,12 @@ impl InvoiceLiquidityContract {
 
         // ---- Update invoice ----
         invoice.status = InvoiceStatus::Paid;
+
+        // Issue #119: Burn the NFT when invoice is marked as paid
+        // Get the current NFT owner (should be the LP who funded it)
+        if let Some(nft_owner) = crate::nft::get_invoice_nft_owner(&env, invoice_id) {
+            crate::nft::burn_invoice_nft(&env, invoice_id, nft_owner)?;
+        }
 
         save_invoice(&env, &invoice);
 
@@ -2058,6 +2088,53 @@ impl InvoiceLiquidityContract {
     /// Access: Anyone
     pub fn get_invoice_count(env: Env) -> u64 {
         crate::invoice::read_next_invoice_id(&env) - 1
+    }
+
+    // ----------------------------------------------------------------
+    // NFT Query Functions (Issue #119)
+    // ----------------------------------------------------------------
+    /// Get the metadata of an invoice NFT
+    /// 
+    /// Returns the NFT metadata including invoice details and current owner.
+    /// 
+    /// # Arguments
+    /// * `invoice_id` - The invoice ID whose NFT metadata to retrieve
+    /// 
+    /// # Errors
+    /// Returns `ContractError::InvoiceNftNotFound` if no NFT exists for this invoice.
+    /// 
+    /// Access: Anyone
+    pub fn get_invoice_nft_metadata(env: Env, invoice_id: u64) -> Result<InvoiceNftMetadata, ContractError> {
+        crate::nft::get_invoice_nft_metadata(&env, invoice_id)
+            .ok_or(ContractError::InvoiceNftNotFound)
+    }
+
+    /// Get the current owner of an invoice NFT
+    /// 
+    /// Returns the address that currently owns the NFT for this invoice.
+    /// 
+    /// # Arguments
+    /// * `invoice_id` - The invoice ID whose NFT owner to retrieve
+    /// 
+    /// # Returns
+    /// Option containing the owner address if the NFT exists, None otherwise.
+    /// 
+    /// Access: Anyone
+    pub fn get_invoice_nft_owner(env: Env, invoice_id: u64) -> Option<Address> {
+        crate::nft::get_invoice_nft_owner(&env, invoice_id)
+    }
+
+    /// Check if an invoice NFT exists
+    /// 
+    /// # Arguments
+    /// * `invoice_id` - The invoice ID to check
+    /// 
+    /// # Returns
+    /// true if the NFT exists, false otherwise.
+    /// 
+    /// Access: Anyone
+    pub fn invoice_nft_exists(env: Env, invoice_id: u64) -> bool {
+        crate::nft::invoice_nft_exists(&env, invoice_id)
     }
 }
 

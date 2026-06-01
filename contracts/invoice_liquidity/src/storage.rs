@@ -46,6 +46,10 @@ pub enum DataKey {
     LpInvoices(Address),
     /// Fixed-size min-heap of the top payers by reputation score (Issue #77).
     TopPayersHeap,
+    /// Invoice NFT metadata storage (Issue #119)
+    InvoiceNft(u64),
+    /// Invoice NFT owner tracking (Issue #119)
+    InvoiceNftOwner(u64),
 }
 
 // ----------------------------------------------------------------
