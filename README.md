@@ -15,6 +15,7 @@ Soroban smart contracts for the Invoice Liquidity Network — a two-sided protoc
 
 | Doc | Description |
 |-----|-------------|
+| [First Invoice Tutorial](docs/tutorials/first-invoice.md) | Hands-on walkthrough: submit, fund, settle, and query an invoice on testnet |
 | [Local Development Guide](docs/local-development.md) | Docker setup, local Stellar node, deploying contracts locally, running tests |
 | [Developer Quickstart](docs/developer-quickstart.md) | Rust toolchain setup, building, testing, and deploying to testnet |
 | [SDK Integration Guide](docs/sdk-integration.md) | TypeScript examples for every contract interaction |
